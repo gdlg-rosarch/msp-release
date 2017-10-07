@@ -8,7 +8,53 @@
 #include <map>
 
 #include "types.hpp"
-#include "PeriodicTimer.hpp"
+
+namespace msp {
+
+class PeriodicTimer {
+public:
+    typedef unsigned int uint;
+
+    /**
+     * @brief PeriodicTimer define a periodic timer
+     * @param funct function that is called periodically
+     * @param period_seconds period in seconds
+     */
+    PeriodicTimer(const std::function<void()> funct, const double period_seconds);
+
+    /**
+     * @brief start define and start background thread
+     */
+    void start();
+
+    /**
+     * @brief stop tell thread to stop and wait for end
+     */
+    void stop();
+
+    /**
+     * @brief getPeriod get period in seconds
+     * @return period in seconds
+     */
+    double getPeriod() {
+        return period_us.count()/1.e6;
+    }
+
+    /**
+     * @brief setPeriod change the update period of timer thread
+     * This will stop and restart the thread.
+     * @param period_seconds period in seconds
+     */
+    void setPeriod(const double period_seconds);
+
+private:
+    std::shared_ptr<std::thread> thread_ptr;
+    std::function<void()> funct;
+    std::chrono::duration<uint, std::micro> period_us;
+    bool running;
+};
+
+} // namespace msp
 
 namespace msp {
 namespace client {
@@ -161,19 +207,23 @@ public:
     /**
      * @brief request requests payload from FC and block until payload has been received
      * @param request request whose data will be set by the received payload
+     * @param timeout (optional) timeout in seconds
      * @return true on success
      * @return false on failure
+     * @return -1 on timeout
      */
-    bool request(msp::Request &request, const double timeout = 0);
+    int request(msp::Request &request, const double timeout = 0);
 
     /**
      * @brief request_raw request raw unstructured payload data
      * @param id message ID
      * @param data reference to data buffer at which the received data will be stores
-     * @return true on success
-     * @return false on failure
+     * @param timeout (optional) timeout in seconds
+     * @return 1 on success
+     * @return 0 on failure
+     * @return -1 on timeout
      */
-    bool request_raw(const uint8_t id, ByteVector &data, const double timeout = 0);
+    int request_raw(const uint8_t id, ByteVector &data, const double timeout = 0);
 
     /**
      * @brief respond send payload to FC and block until an ACK has been received
