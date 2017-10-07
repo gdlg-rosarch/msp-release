@@ -3,6 +3,47 @@
 #include <iostream>
 
 namespace msp {
+
+PeriodicTimer::PeriodicTimer(std::function<void()> funct, const double period_seconds)
+    : funct(funct), running(false)
+{
+    period_us = std::chrono::duration<uint, std::micro>(uint(period_seconds*1e6));
+}
+
+void PeriodicTimer::start() {
+    // only start thread if period is above 0
+    if(!(period_us.count()>0))
+        return;
+
+    thread_ptr = std::shared_ptr<std::thread>(new std::thread(
+    [this]{
+        running = true;
+        while(running) {
+            // call function and wait until end of period
+            const auto tstart = std::chrono::high_resolution_clock::now();
+            funct();
+            std::this_thread::sleep_until(tstart+period_us);
+        } // while running
+    }
+    ));
+}
+
+void PeriodicTimer::stop() {
+    running = false;
+    if(thread_ptr!=nullptr && thread_ptr->joinable()) {
+        thread_ptr->join();
+    }
+}
+
+void PeriodicTimer::setPeriod(const double period_seconds) {
+    stop();
+    period_us = std::chrono::duration<uint, std::micro>(uint(period_seconds*1e6));
+    start();
+}
+
+} // namespace msp
+
+namespace msp {
 namespace client {
 
 Client::Client() : port(io), running(false), print_warnings(false) { }
@@ -61,14 +102,14 @@ bool Client::sendData(const uint8_t id, const ByteVector &data) {
     return (bytes_written==msg.size());
 }
 
-bool Client::request(msp::Request &request, const double timeout) {
+int Client::request(msp::Request &request, const double timeout) {
     msp::ByteVector data;
-    const bool success = request_raw(uint8_t(request.id()), data, timeout);
-    if(success) { request.decode(data); }
+    const int success = request_raw(uint8_t(request.id()), data, timeout);
+    if(success==1) { request.decode(data); }
     return success;
 }
 
-bool Client::request_raw(const uint8_t id, ByteVector &data, const double timeout) {
+int Client::request_raw(const uint8_t id, ByteVector &data, const double timeout) {
     // send request
     if(!sendRequest(id)) { return false; }
 
@@ -84,7 +125,7 @@ bool Client::request_raw(const uint8_t id, ByteVector &data, const double timeou
 
     if(timeout>0) {
         if(!cv_request.wait_for(lock, std::chrono::milliseconds(uint(timeout*1e3)), predicate))
-            return false;
+            return -1;
     }
     else {
         cv_request.wait(lock, predicate);
