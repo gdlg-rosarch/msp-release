@@ -2,18 +2,18 @@
 #define CLIENT_HPP
 
 #include <string>
-#include <asio.hpp>
 #include <thread>
+#include <mutex>
 #include <condition_variable>
 #include <map>
-
 #include "types.hpp"
 
 namespace msp {
 
+struct SerialPortImpl;
+
 class PeriodicTimer {
 public:
-    typedef unsigned int uint;
 
     /**
      * @brief PeriodicTimer define a periodic timer
@@ -21,6 +21,8 @@ public:
      * @param period_seconds period in seconds
      */
     PeriodicTimer(const std::function<void()> funct, const double period_seconds);
+
+    ~PeriodicTimer() { stop(); }
 
     /**
      * @brief start define and start background thread
@@ -50,7 +52,8 @@ public:
 private:
     std::shared_ptr<std::thread> thread_ptr;
     std::function<void()> funct;
-    std::chrono::duration<uint, std::micro> period_us;
+    std::chrono::duration<size_t, std::micro> period_us;
+    std::timed_mutex mutex_timer;
     bool running;
 };
 
@@ -94,28 +97,25 @@ protected:
     PeriodicTimer *timer;
 };
 
-template<typename T, typename C>
+template<typename T>
 class Subscription : public SubscriptionBase {
 public:
-    typedef void(C::*Callback)(const T&);
+    typedef std::function<void(const T&)> Callback;
 
-    Subscription(const Callback caller, C *const context_class)
-        : funct(caller), context(context_class) {
-    }
+    Subscription(const Callback &callback) : callback(callback) { }
 
-    Subscription(const Callback caller, C *const context_class, PeriodicTimer *timer)
-        : SubscriptionBase(timer), funct(caller), context(context_class)
+    Subscription(const Callback &callback, PeriodicTimer *timer)
+        : SubscriptionBase(timer), callback(callback)
     {
         this->timer->start();
     }
 
     void call(const msp::Request &req) {
-        (*context.*funct)( dynamic_cast<const T&>(req) );
+        callback( dynamic_cast<const T&>(req) );
     }
 
 private:
-    Callback funct;
-    C *const context;
+    Callback callback;
 };
 
 enum MessageStatus {
@@ -146,7 +146,7 @@ public:
      * @param baudrate serial baudrate (default: 115200)
      * @return true on success
      */
-    void connect(const std::string &device, const uint baudrate=115200);
+    void connect(const std::string &device, const size_t baudrate=115200);
 
     /**
      * @brief waitForOneMessage block until one message has been received
@@ -248,11 +248,22 @@ public:
      * @brief subscribe register callback function that is called when type is received
      * @param callback pointer to callback function (class method)
      * @param context class with callback method
-     * @param tp period at a timer will send subscribed requests (in seconds), by default this is 0 and requests are not sent periodically
+     * @param tp period of timer that will send subscribed requests (in seconds), by default this is 0 and requests are not sent periodically
      * @return pointer to subscription that is added to internal list
      */
     template<typename T, typename C>
     SubscriptionBase* subscribe(void (C::*callback)(const T&), C *context, const double tp = 0.0) {
+        return subscribe<T>(std::bind(callback, context, std::placeholders::_1), tp);
+    }
+
+    /**
+     * @brief subscribe register callback function that is called when type is received
+     * @param callback function (e.g. lambda, class method, function pointer)
+     * @param tp period of timer that will send subscribed requests (in seconds), by default this is 0 and requests are not sent periodically
+     * @return pointer to subscription that is added to internal list
+     */
+    template<typename T>
+    SubscriptionBase* subscribe(const std::function<void(const T&)> &callback, const double tp = 0.0) {
 
         if(!std::is_base_of<msp::Request, T>::value)
             throw std::runtime_error("Callback parameter needs to be of Request type!");
@@ -269,7 +280,7 @@ public:
         subscribed_requests[id] = new T();
 
         // register subscription
-        subscriptions[id] = new Subscription<T,C>(callback, context,
+        subscriptions[id] = new Subscription<T>(callback,
             new PeriodicTimer(
                 std::bind(static_cast<bool(Client::*)(msp::ID)>(&Client::sendRequest), this, id),
                 tp
@@ -311,9 +322,7 @@ private:
 
 private:
     // I/O
-    asio::io_service io;
-    asio::serial_port port;
-    asio::streambuf buffer;
+    std::unique_ptr<SerialPortImpl> pimpl;
     // threading
     std::thread thread;
     bool running;

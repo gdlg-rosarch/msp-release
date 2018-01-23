@@ -1,4 +1,5 @@
 #include <Client.hpp>
+#include "SerialPortImpl.cpp"
 
 #include <iostream>
 
@@ -7,22 +8,24 @@ namespace msp {
 PeriodicTimer::PeriodicTimer(std::function<void()> funct, const double period_seconds)
     : funct(funct), running(false)
 {
-    period_us = std::chrono::duration<uint, std::micro>(uint(period_seconds*1e6));
+    period_us = std::chrono::duration<size_t, std::micro>(size_t(period_seconds*1e6));
 }
 
 void PeriodicTimer::start() {
     // only start thread if period is above 0
     if(!(period_us.count()>0))
         return;
-
+    mutex_timer.lock();
     thread_ptr = std::shared_ptr<std::thread>(new std::thread(
     [this]{
         running = true;
         while(running) {
-            // call function and wait until end of period
+            // call function and wait until end of period or stop is called
             const auto tstart = std::chrono::high_resolution_clock::now();
             funct();
-            std::this_thread::sleep_until(tstart+period_us);
+            if (mutex_timer.try_lock_until(tstart + period_us)) {
+                mutex_timer.unlock();
+            }
         } // while running
     }
     ));
@@ -30,6 +33,7 @@ void PeriodicTimer::start() {
 
 void PeriodicTimer::stop() {
     running = false;
+    mutex_timer.unlock();
     if(thread_ptr!=nullptr && thread_ptr->joinable()) {
         thread_ptr->join();
     }
@@ -37,7 +41,7 @@ void PeriodicTimer::stop() {
 
 void PeriodicTimer::setPeriod(const double period_seconds) {
     stop();
-    period_us = std::chrono::duration<uint, std::micro>(uint(period_seconds*1e6));
+    period_us = std::chrono::duration<size_t, std::micro>(size_t(period_seconds*1e6));
     start();
 }
 
@@ -46,7 +50,7 @@ void PeriodicTimer::setPeriod(const double period_seconds) {
 namespace msp {
 namespace client {
 
-Client::Client() : port(io), running(false), print_warnings(false) { }
+Client::Client() : pimpl(new SerialPortImpl), running(false), print_warnings(false) { }
 
 Client::~Client() {
     for(const std::pair<msp::ID, msp::Request*> d : subscribed_requests)
@@ -56,13 +60,13 @@ Client::~Client() {
         delete s.second;
 }
 
-void Client::connect(const std::string &device, const uint baudrate) {
-    port.open(device);
+void Client::connect(const std::string &device, const size_t baudrate) {
+    pimpl->port.open(device);
 
-    port.set_option(asio::serial_port::baud_rate(baudrate));
-    port.set_option(asio::serial_port::parity(asio::serial_port::parity::none));
-    port.set_option(asio::serial_port::character_size(asio::serial_port::character_size(8)));
-    port.set_option(asio::serial_port::stop_bits(asio::serial_port::stop_bits::one));
+    pimpl->port.set_option(asio::serial_port::baud_rate(baudrate));
+    pimpl->port.set_option(asio::serial_port::parity(asio::serial_port::parity::none));
+    pimpl->port.set_option(asio::serial_port::character_size(asio::serial_port::character_size(8)));
+    pimpl->port.set_option(asio::serial_port::stop_bits(asio::serial_port::stop_bits::one));
 }
 
 void Client::start() {
@@ -74,16 +78,17 @@ void Client::start() {
 
 void Client::stop() {
     running = false;
-    io.stop();
+    pimpl->io.stop();
+    pimpl->port.close();
     thread.join();
 }
 
 uint8_t Client::read() {
-    if(buffer.sgetc()==EOF) {
-        asio::read(port, buffer, asio::transfer_exactly(1));
+    if(pimpl->buffer.sgetc()==EOF) {
+        asio::read(pimpl->port, pimpl->buffer, asio::transfer_exactly(1));
     }
 
-    return uint8_t(buffer.sbumpc());
+    return uint8_t(pimpl->buffer.sbumpc());
 }
 
 bool Client::sendData(const uint8_t id, const ByteVector &data) {
@@ -97,7 +102,12 @@ bool Client::sendData(const uint8_t id, const ByteVector &data) {
     msg.insert(msg.end(), data.begin(), data.end());    // data
     msg.push_back( crc(id, data) );                     // crc
 
-    const std::size_t bytes_written = asio::write(port, asio::buffer(msg.data(), msg.size()));
+    asio::error_code ec;
+    const std::size_t bytes_written = asio::write(pimpl->port, asio::buffer(msg.data(), msg.size()), ec);
+    if (ec == asio::error::operation_aborted) {
+        //operation_aborted error probably means the client is being closed
+        return false;
+    }
 
     return (bytes_written==msg.size());
 }
@@ -124,7 +134,7 @@ int Client::request_raw(const uint8_t id, ByteVector &data, const double timeout
     };
 
     if(timeout>0) {
-        if(!cv_request.wait_for(lock, std::chrono::milliseconds(uint(timeout*1e3)), predicate))
+        if(!cv_request.wait_for(lock, std::chrono::milliseconds(size_t(timeout*1e3)), predicate))
             return -1;
     }
     else {
@@ -173,11 +183,14 @@ uint8_t Client::crc(const uint8_t id, const ByteVector &data) {
 
 void Client::processOneMessage() {
     std::lock_guard<std::mutex> lck(mutex_buffer);
-
-    const std::size_t bytes_transferred = asio::read_until(port, buffer, "$M");
-
+    asio::error_code ec;
+    const std::size_t bytes_transferred = asio::read_until(pimpl->port, pimpl->buffer, "$M", ec);
+    if (ec == asio::error::operation_aborted) {
+        //operation_aborted error probably means the client is being closed
+        return;
+    }
     // ignore and remove header bytes
-    buffer.consume(bytes_transferred);
+    pimpl->buffer.consume(bytes_transferred);
 
     MessageStatus status = OK;
 
@@ -192,12 +205,12 @@ void Client::processOneMessage() {
     const uint8_t id = read();
 
     if(print_warnings && !ok_id) {
-        std::cerr << "Message with ID " << uint(id) << " is not recognised!" << std::endl;
+        std::cerr << "Message with ID " << size_t(id) << " is not recognised!" << std::endl;
     }
 
     // payload
     std::vector<uint8_t> data;
-    for(uint i(0); i<len; i++) {
+    for(size_t i(0); i<len; i++) {
         data.push_back(read());
     }
 
@@ -207,7 +220,7 @@ void Client::processOneMessage() {
     const bool ok_crc = (rcv_crc==exp_crc);
 
     if(print_warnings && !ok_crc) {
-        std::cerr << "Message with ID " << uint(id) << " has wrong CRC! (expected: " << uint(exp_crc) << ", received: "<< uint(rcv_crc) << ")" << std::endl;
+        std::cerr << "Message with ID " << size_t(id) << " has wrong CRC! (expected: " << size_t(exp_crc) << ", received: "<< size_t(rcv_crc) << ")" << std::endl;
     }
 
     if(!ok_id) { status = FAIL_ID; }
