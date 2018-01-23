@@ -6,8 +6,6 @@
 
 namespace fcu {
 
-typedef unsigned int uint;
-
 enum class FirmwareType {
     MULTIWII,
     CLEANFLIGHT
@@ -15,7 +13,7 @@ enum class FirmwareType {
 
 class FlightController {
 public:
-    FlightController(const std::string &device, const uint baudrate=115200);
+    FlightController(const std::string &device, const size_t baudrate=115200);
 
     ~FlightController();
 
@@ -39,12 +37,23 @@ public:
      * @brief subscribe register callback function that is called when type is received
      * @param callback pointer to callback function (class method)
      * @param context class with callback method
-     * @param tp period at a timer will send subscribed requests (in seconds), by default this is 0 and requests are not sent periodically
+     * @param tp period of timer that will send subscribed requests (in seconds), by default this is 0 and requests are not sent periodically
      * @return pointer to subscription that is added to internal list
      */
     template<typename T, typename C>
     msp::client::SubscriptionBase* subscribe(void (C::*callback)(const T&), C *context, const double tp = 0.0) {
         return client.subscribe(callback, context, tp);
+    }
+
+    /**
+     * @brief subscribe register callback function that is called when type is received
+     * @param callback function (e.g. lambda, class method, function pointer)
+     * @param tp period of timer that will send subscribed requests (in seconds), by default this is 0 and requests are not sent periodically
+     * @return pointer to subscription that is added to internal list
+     */
+    template<typename T>
+    msp::client::SubscriptionBase* subscribe(const std::function<void(const T&)> &callback, const double tp = 0.0) {
+        return client.subscribe(callback, tp);
     }
 
     /**
@@ -94,7 +103,7 @@ public:
 
     void initBoxes();
 
-    std::map<std::string, uint> &getBoxNames() {
+    std::map<std::string, size_t> &getBoxNames() {
         return box_name_ids;
     }
 
@@ -227,7 +236,7 @@ private:
 
     msp::client::Client client;
 
-    std::map<std::string, uint> box_name_ids;
+    std::map<std::string, size_t> box_name_ids;
 
     msp::msg::Ident ident;
 
