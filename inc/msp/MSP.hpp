@@ -3,16 +3,18 @@
 
 #include "types.hpp"
 
-#include <asio.hpp>
 #include <stdexcept>
 #include <chrono>
 #include <mutex>
+#include <memory>
 
 namespace msp {
 
+struct SerialPortImpl;
+
 // size of header+crc, e.g. amount of bytes in MSP message that do not belong to payload
 // preamble (2) + direction (1) + size (1) + command (1) + crc (1) = 6
-static const uint FRAME_SIZE = 6;
+static const size_t FRAME_SIZE = 6;
 
 // exception to throw when header contains wrong data
 class MalformedHeader : public std::runtime_error {
@@ -41,7 +43,7 @@ public:
     WrongCRC(const uint8_t msg_id, const uint8_t exp, const uint8_t rcv)
         : std::runtime_error(
               "CRC not matching: "
-              "Message "+std::to_string(uint(msg_id))+", "
+              "Message "+std::to_string(size_t(msg_id))+", "
               "expected CRC "+std::to_string(exp)+", "
               "received CRC "+std::to_string(rcv))
     { }
@@ -90,7 +92,9 @@ public:
      * @param device device path
      * @param baudrate serial baudrate
      */
-    MSP(const std::string &device, const uint baudrate=115200);
+    MSP(const std::string &device, const size_t baudrate=115200);
+
+    ~MSP();
 
     /**
      * @brief connect establish connection to serial device
@@ -98,7 +102,7 @@ public:
      * @param baudrate serial baudrate (default: 115200)
      * @return true on success
      */
-    bool connect(const std::string &device, const uint baudrate=115200);
+    bool connect(const std::string &device, const size_t baudrate=115200);
 
     /**
      * @brief request send command and request data from FC once
@@ -122,7 +126,7 @@ public:
      * @param min_payload_size minimum amount of payload (bytes) that needs to be available before reading and decoding of a message starts
      * @return true when data has been received
      */
-    bool request_wait(msp::Request &request, const uint wait_ms, const uint min_payload_size = 0);
+    bool request_wait(msp::Request &request, const size_t wait_ms, const size_t min_payload_size = 0);
 
     /**
      * @brief respond send data to FC and read acknowledge
@@ -238,8 +242,7 @@ private:
     void clear();
 
     std::string device;
-    asio::io_service io;     ///<! io service
-    asio::serial_port port;  ///<! port for serial device
+    std::unique_ptr<SerialPortImpl> pimpl;
     std::mutex lock_write;
     std::mutex lock_read;
     unsigned int wait;  //!< time (micro seconds) to wait before waiting for response
